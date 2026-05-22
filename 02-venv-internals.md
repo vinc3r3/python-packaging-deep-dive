@@ -1,364 +1,436 @@
-# 02 — venv Internals
+# 02 - venv Internals
 
-This note explains how Python virtual environments are actually constructed and what changes when you “activate” one.
+This chapter explains what Python virtual environments actually do.
 
-A virtual environment is not isolation in the OS sense. It is a controlled rewrite of interpreter paths and environment variables.
+Many beginners hear "virtual environment" and imagine something closer to a container or sandbox. That is not what `venv` provides.
 
----
+A virtual environment mainly changes which Python executable, package directory, and script entry points your shell and interpreter resolve to.
 
-# 1. What a venv really is
+That sounds simple, but it explains most of the behavior people care about:
 
-A virtual environment is:
-
-```
-
-A lightweight, self-contained Python installation that redirects:
-
-* interpreter resolution
-* package installation path
-* script execution paths
-
-````
-
-It does NOT:
-- sandbox system access
-- isolate kernel resources
-- create containers or processes
-
-It only modifies *how Python finds things*.
+- why `python` and `pip` suddenly point somewhere else
+- why packages installed in one project are not visible in another
+- why activation helps, but is not strictly required
+- why virtual environments do not solve system-library problems
 
 ---
 
-# 2. venv directory structure
+# 1. The short version
 
-When you run:
+A virtual environment is a lightweight Python environment built from an existing base interpreter.
+
+Its job is to give you:
+
+- a Python executable for that environment
+- a private `site-packages` directory
+- local script entry points such as `pip`
+- startup configuration that points Python at the environment
+
+It does not give you:
+
+- a container
+- a security sandbox
+- kernel or process isolation
+- isolation from all system dependencies
+
+The real effect of a virtual environment is:
+
+> path redirection for Python and Python-installed tools
+
+---
+
+# 2. Why `venv` exists
+
+Without virtual environments, Python packages are often installed into one shared location.
+
+That creates familiar problems:
+
+- project A needs one version of a library
+- project B needs another
+- global installs accidentally affect unrelated work
+- `pip install` changes behavior outside the current project
+
+`venv` solves this by giving each project its own package installation area while still reusing a base Python installation.
+
+---
+
+# 3. Creating a virtual environment
+
+A typical command looks like this:
 
 ```bash
 python -m venv .venv
-````
-
-Python creates:
-
-```text id="p3n8yy"
-.venv/
-├── bin/ (Linux/macOS)
-│   ├── python
-│   ├── pip
-│   └── activate
-│
-├── Scripts/ (Windows)
-│   ├── python.exe
-│   ├── pip.exe
-│   └── activate.bat
-│
-├── lib/
-│   └── python3.x/
-│       └── site-packages/
-│
-├── pyvenv.cfg
 ```
+
+This does not create a whole new Python implementation from scratch.
+
+Instead, it creates a directory structure that points back to a base interpreter while giving the new environment its own local package area and helper scripts.
 
 ---
 
-# 3. The key file: pyvenv.cfg
+# 4. Typical directory structure
 
-This file defines how the venv behaves.
+After creation, a virtual environment usually looks roughly like this:
 
-Example:
+```text
+.venv/
+├── bin/                  # Linux/macOS command entry points
+│   ├── python
+│   ├── pip
+│   └── activate
+├── Scripts/              # Windows equivalents
+│   ├── python.exe
+│   ├── pip.exe
+│   └── activate.bat
+├── lib/
+│   └── python3.x/
+│       └── site-packages/
+└── pyvenv.cfg
+```
 
-```text id="c0tq9g"
+The exact details vary by platform, but these are the important pieces conceptually:
+
+- a Python launcher for the environment
+- environment-local install locations
+- activation scripts
+- a small config file that records how the environment was created
+
+---
+
+# 5. `pyvenv.cfg` is the key file
+
+One of the most important files is:
+
+```text
+.venv/pyvenv.cfg
+```
+
+It often looks something like:
+
+```text
 home = /usr/bin
 include-system-site-packages = false
 version = 3.11.5
 ```
 
-### Meaning:
+This file tells Python important facts about the environment, including:
 
-* `home`: original Python installation
-* `include-system-site-packages`: whether global packages leak in
-* `version`: interpreter version
+- which base installation the venv came from
+- whether system `site-packages` should be visible
+- which interpreter version created it
 
-This file is read by the interpreter at startup.
+The key setting for isolation is usually:
+
+```text
+include-system-site-packages = false
+```
+
+That means the environment should use its own package directory rather than automatically exposing globally installed packages.
 
 ---
 
-# 4. What changes when you enter a venv
+# 6. What actually changes in a venv
 
-When you activate a venv:
+The easiest way to understand a venv is to compare before and after.
+
+Without a virtual environment, `python` may resolve to a system or globally installed interpreter.
+
+Inside a virtual environment, you want commands like:
+
+```bash
+python
+pip
+```
+
+to resolve to the environment-local versions instead.
+
+At runtime, the important changes are usually:
+
+- `sys.prefix` points to the virtual environment
+- `sys.path` includes the environment's `site-packages`
+- shell command lookup finds the environment's `python` and `pip`
+
+Those three shifts account for most of the "it works in this venv but not that one" behavior.
+
+---
+
+# 7. `sys.prefix` vs `sys.base_prefix`
+
+These values are one of the clearest ways to see a virtual environment in action:
+
+```python
+import sys
+print("prefix:", sys.prefix)
+print("base_prefix:", sys.base_prefix)
+```
+
+In a typical venv:
+
+- `sys.prefix` points at the venv directory
+- `sys.base_prefix` points at the original base Python installation
+
+That gives you a quick venv check:
+
+```python
+import sys
+print(sys.prefix != sys.base_prefix)
+```
+
+If that prints `True`, you are probably inside a virtual environment.
+
+This is one of the most useful inspection tricks when debugging environment confusion.
+
+---
+
+# 8. What happens to `sys.path`
+
+When Python starts inside a virtual environment, it builds `sys.path` differently from the base interpreter.
+
+Most importantly, it adds the venv's own package directory, typically something like:
+
+```text
+.venv/lib/pythonX.Y/site-packages/
+```
+
+That means imports are resolved against packages installed in this environment.
+
+If `include-system-site-packages` is disabled, globally installed packages should not be part of the normal third-party import set.
+
+So the practical effect is:
+
+- packages installed into this venv are visible here
+- packages installed into some other venv are not
+- global packages are hidden unless explicitly allowed
+
+---
+
+# 9. What gets copied, and what does not
+
+Newcomers sometimes assume a venv contains a full duplicate of Python. Usually it does not.
+
+A virtual environment typically includes:
+
+- a Python executable or launcher
+- `pip` and other installed script entry points
+- activation scripts
+- its own `site-packages` directory
+- `pyvenv.cfg`
+
+It usually does not duplicate:
+
+- the full standard library in a completely independent form
+- the entire interpreter toolchain
+- operating system libraries
+- external system dependencies
+
+The exact implementation can vary by platform. Some setups use copies, some use symlinks, and some use launcher behavior.
+
+The big picture stays the same:
+
+> the environment is lightweight because it reuses a base interpreter and changes path resolution
+
+---
+
+# 10. Activation is a shell convenience layer
+
+On Unix-like systems, activation often looks like:
 
 ```bash
 source .venv/bin/activate
 ```
 
-you are NOT changing Python itself.
+On Windows, it uses the matching script under `Scripts/`.
 
-You are modifying environment variables:
+Activation mostly changes shell state, especially:
 
-### PATH modification
+- `PATH`, so `python` and `pip` resolve to the venv first
+- the prompt, so you can see which environment is active
 
-Before:
+It does not rewrite Python itself.
 
-```text id="7b1qkz"
-/usr/bin/python
-```
+That is why this works even without activation:
 
-After:
-
-```text id="1g3xzn"
-.venv/bin/python
-```
-
-So `python` resolves to the venv interpreter.
-
----
-
-# 5. sys.prefix behavior
-
-Inside a venv:
-
-```python id="l9xq2m"
-import sys
-print(sys.prefix)
-```
-
-Output:
-
-```text id="v8kq9a"
-/path/to/project/.venv
-```
-
-But:
-
-```python id="z1m0rt"
-print(sys.base_prefix)
-```
-
-Output:
-
-```text id="p2n8sd"
-/usr (or system Python root)
-```
-
-### Interpretation:
-
-* base_prefix = original Python install
-* prefix = active environment
-
-This is the core venv detection mechanism.
-
----
-
-# 6. How Python modifies sys.path in a venv
-
-When a venv is active, Python injects:
-
-```text id="u7m1ld"
-.venv/lib/pythonX.Y/site-packages
-```
-
-into `sys.path` at runtime.
-
-So imports now resolve to:
-
-* venv packages first
-* system packages only if allowed
-
----
-
-# 7. site-packages duplication model
-
-Each venv has its own:
-
-```text id="b4n0xq"
-.venv/lib/pythonX.Y/site-packages/
-```
-
-This means:
-
-* pip installs are local
-* packages are not shared
-* dependency graphs are isolated per project
-
-This is the core isolation mechanism.
-
----
-
-# 8. What actually gets “copied” into a venv
-
-A venv does NOT copy the full Python installation.
-
-It typically includes:
-
-### Lightweight copies / symlinks:
-
-* python executable (or link to system python)
-* pip launcher scripts
-* activation scripts
-
-### Not copied:
-
-* standard library
-* compiled interpreter core
-* system dependencies
-
----
-
-# 9. Why venv is lightweight
-
-Instead of duplicating Python, venv relies on:
-
-```
-shared interpreter + redirected paths
-```
-
-So multiple environments can share:
-
-* same Python binary
-* same stdlib
-* different site-packages
-
-This is why venv creation is fast.
-
----
-
-# 10. Activation is just shell manipulation
-
-Activation scripts modify:
-
-## PATH
-
-so `python` and `pip` resolve to venv
-
-## shell prompt (optional)
-
-visual indicator only
-
-Example:
-
-```bash id="k2v7we"
-(.venv) user@machine$
-```
-
-Important:
-
-> Activation does NOT modify Python itself.
-
-If you call Python directly:
-
-```bash id="r4q9lm"
+```bash
 ./.venv/bin/python script.py
 ```
 
-it behaves exactly the same without activation.
+If you call the environment's interpreter directly, you get the same Python behavior whether or not your shell was activated first.
+
+This is an important distinction:
+
+> activation changes command resolution in your shell, not the meaning of the interpreter binary itself
 
 ---
 
-# 11. Why activation exists at all
+# 11. Why activation is still useful
 
-Activation is purely convenience:
+If activation is optional, why do people use it?
 
-* avoids typing full path
-* ensures correct pip/python pairing
-* reduces human error
+Because it reduces mistakes.
 
-But technically unnecessary.
+It helps by:
+
+- avoiding long executable paths
+- keeping `python` and `pip` paired to the same environment
+- making the active environment visible in the prompt
+- lowering the chance that you accidentally install into the wrong interpreter
+
+So activation is not technically required, but it is very useful ergonomically.
 
 ---
 
-# 12. pip inside a venv
+# 12. How `pip` behaves inside a venv
 
-Once activated:
+Inside a virtual environment, `pip install ...` usually installs into that environment's `site-packages`.
 
-```bash id="t7n3qp"
+For example:
+
+```bash
 pip install requests
 ```
 
-installs into:
+typically targets a path like:
 
-```text id="a9m2wx"
-.venv/lib/pythonX.Y/site-packages
+```text
+.venv/lib/pythonX.Y/site-packages/
 ```
 
-pip detects venv via:
+This is why packages installed in one project do not automatically appear in another project's environment.
 
-* sys.prefix
-* environment markers
-* installation path resolution
+In practice, the safest habit is:
+
+```bash
+python -m pip install requests
+```
+
+That makes the interpreter-package-manager pairing explicit.
+
+It removes one common source of confusion:
+
+- `pip` from one interpreter
+- `python` from another
 
 ---
 
-# 13. venv isolation boundary
+# 13. What a venv isolates
 
-A venv isolates ONLY:
+A virtual environment does isolate some things well.
 
-### Isolated:
+Usually isolated:
 
-* Python packages
-* installed binaries (console scripts)
-* sys.path resolution
+- third-party Python packages
+- Python-installed console scripts
+- import resolution for those installed packages
 
-### NOT isolated:
+Usually not isolated:
 
-* system libraries (libc, CUDA, etc.)
-* OS files
-* environment variables (except PATH)
-* process execution
+- operating system files
+- system shared libraries such as `libc`
+- GPU drivers and CUDA installations
+- network access
+- arbitrary environment variables unless you change them
 
-This is NOT a container.
+So if a wheel depends on a missing system library, a venv will not fix that.
+
+That is why native packages can still fail even when your virtual environment setup looks correct.
 
 ---
 
 # 14. Common misconception
 
-A venv is NOT:
+A virtual environment is not:
 
-* a Docker container
-* a sandbox
-* a separate OS environment
+- Docker
+- a VM
+- a process sandbox
+- a separate operating system environment
 
-It is:
+It is better described as:
 
-> a redirected Python interpreter context
+> a Python interpreter context with redirected package and script paths
 
----
-
-# 15. Why venv still fails sometimes
-
-Even with venv, problems occur due to:
-
-* system-level shared libraries (e.g. libstdc++)
-* CUDA mismatches
-* pip installing incompatible wheels
-* mixing interpreters (python vs python3 vs system python)
-* editable installs leaking paths
+That definition is less flashy, but much closer to what really happens.
 
 ---
 
-# 16. Key mental model
+# 15. Why venvs still fail sometimes
 
-A venv is best understood as:
+Even when using venv correctly, problems still happen.
 
+Common reasons include:
+
+- using the wrong interpreter to create the environment
+- using one `python` and a different `pip`
+- broken or unexpected `PATH` ordering
+- editable installs adding surprising import paths
+- incompatible wheels for the active interpreter
+- missing system libraries or external runtimes
+
+A venv solves package-location problems very well.
+
+It does not solve every problem that happens to involve Python.
+
+---
+
+# 16. A practical inspection checklist
+
+When a virtual environment behaves strangely, inspect these first:
+
+```python
+import sys
+import site
+
+print("executable:", sys.executable)
+print("prefix:", sys.prefix)
+print("base_prefix:", sys.base_prefix)
+print("in venv:", sys.prefix != sys.base_prefix)
+print("site-packages:", site.getsitepackages())
+print("sys.path:")
+for p in sys.path:
+    print(" ", p)
 ```
-System Python
-   +
-Path redirection layer
-   +
-Private site-packages directory
+
+And from the shell:
+
+```bash
+which python
+which pip
+python -m pip --version
 ```
 
-Nothing more.
+Those checks usually reveal whether:
+
+- you launched the interpreter you thought you launched
+- the venv is actually active
+- `pip` is installing into the same environment your `python` is using
 
 ---
 
-# 17. What comes next
+# 17. Key mental model
 
-Next layer:
+A virtual environment is best understood as:
 
-→ 03 — site-packages
+```text
+[ base Python interpreter ]
+           +
+[ redirected prefixes and paths ]
+           +
+[ private site-packages and scripts ]
+```
 
-We will go deeper into:
+That is the core of `venv`.
 
-* how packages are physically stored
-* how `.dist-info` works
-* how imports map to filesystem structures
-* why namespace packages behave strangely
+Everything else is convenience, platform detail, or tooling around that mechanism.
+
+---
+
+# 18. What comes next
+
+Next: `03 - site-packages`
+
+There we will look at:
+
+- how installed packages are laid out on disk
+- what `.dist-info` directories are for
+- how imports relate to installed files
+- why namespace packages can feel surprising
