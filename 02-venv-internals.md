@@ -88,6 +88,8 @@ After creation, a virtual environment usually looks roughly like this:
 └── pyvenv.cfg
 ```
 
+On Windows you get a `Scripts/` directory instead of `bin/`, and `lib/` is laid out as `Lib/site-packages/`. A given venv has one layout or the other, never both at once; the tree above shows them side by side only to compare.
+
 The exact details vary by platform, but these are the important pieces conceptually:
 
 - a Python launcher for the environment
@@ -115,9 +117,11 @@ version = 3.11.5
 
 This file tells Python important facts about the environment, including:
 
-- which base installation the venv came from
-- whether system `site-packages` should be visible
-- which interpreter version created it
+- `home` — the directory of the base interpreter the venv was built from
+- `include-system-site-packages` — whether the base install's `site-packages` should be visible
+- `version` — the interpreter version that created it
+
+Python 3.11+ also records `executable` (the full path to the base interpreter) and `command` (the exact `venv` command used to create the environment), which are handy for reproducing or debugging a venv.
 
 The key setting for isolation is usually:
 
@@ -126,6 +130,10 @@ include-system-site-packages = false
 ```
 
 That means the environment should use its own package directory rather than automatically exposing globally installed packages.
+
+### `pyvenv.cfg` is what makes the venv a venv
+
+This file is not just documentation — it is the actual trigger for venv behavior. The next section explains why.
 
 ---
 
@@ -151,6 +159,23 @@ At runtime, the important changes are usually:
 - shell command lookup finds the environment's `python` and `pip`
 
 Those three shifts account for most of the "it works in this venv but not that one" behavior.
+
+### How the redirection actually happens
+
+This is the part that makes a venv feel like magic until you see it. There is no special "venv interpreter."
+
+The `bin/python` inside the venv is just a symlink (or a thin copy) of the **base** interpreter. The trick is in what that interpreter does at startup:
+
+1. it looks at its own executable location and checks for a `pyvenv.cfg` one directory above `bin/` (i.e. at the venv root)
+2. if it finds one, it reads `home` to locate the base installation and its standard library
+3. it sets `sys.base_prefix` to that base install, and `sys.prefix` to the venv root
+4. it adds the venv's own `site-packages` to `sys.path`
+
+So it is the **same interpreter binary**, reconfigured by the presence of a config file:
+
+> same `python` binary + a `pyvenv.cfg` next to it → a different environment
+
+That single fact explains why a venv is so cheap to create, why deleting `pyvenv.cfg` "un-venvs" the directory, and why copying a venv to another machine breaks (the `home` path no longer exists).
 
 ---
 

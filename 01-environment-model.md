@@ -106,12 +106,22 @@ for p in sys.path:
 
 For a typical interpreter session, the list usually includes:
 
-1. the current project or working directory
+1. a location that depends on how you launched Python (see below)
 2. paths from `PYTHONPATH`, if that variable is set
 3. standard library directories
 4. `site-packages` directories for third-party packages
 
 The important part is not just what is in `sys.path`, but the order.
+
+### `sys.path[0]` depends on how you started Python
+
+The first entry is a common source of confusion, because it is *not* always "the current directory":
+
+- `python script.py` → the directory **containing the script**, not your current working directory
+- `python -m some.module` → the current working directory (added as `''`)
+- `python` (REPL) or `python -c "..."` → the current working directory (added as `''`)
+
+This is why a script can import a sibling file when run directly, but the "same" import can fail from a different launch mode. Python 3.11+ can suppress this automatic first entry with the `-P` flag or the `PYTHONSAFEPATH` environment variable, which is useful when you want to avoid accidental local shadowing of stdlib or installed packages.
 
 ---
 
@@ -125,12 +135,14 @@ import requests
 
 In the normal case, Python roughly does this:
 
-1. walk through `sys.path` from top to bottom
-2. look for something that can satisfy `requests`
-3. stop at the first matching result
-4. load it and cache it in `sys.modules`
+1. check `sys.modules` first; if `requests` is already imported, return the cached module immediately and stop
+2. otherwise, ask each finder in `sys.meta_path` to locate `requests`
+3. the path-based finder is the one that walks `sys.path` from top to bottom, stopping at the first match
+4. load it and store it in `sys.modules` so the next import is a cache hit
 
-For regular packages, that often means checking for things like:
+The order matters more than it first appears. `sys.path` is only consulted on a cache miss, which is why re-importing an already-loaded module is essentially free and why `sys.path` changes don't affect modules that are already imported.
+
+For regular packages, the path-based finder often means checking for things like:
 
 - `requests.py`
 - `requests/__init__.py`
